@@ -1,0 +1,60 @@
+# prod/docker-compose.yml
+# Produktiver Stack: Moodle 4.5 LTS + MySQL 8.0
+# Nutzung: docker compose -p prod up -d
+
+services:
+  moodle_db:
+    image: mysql:8.0
+    container_name: prod-moodle_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - moodle_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  moodle_app:
+    image: bitnami/moodle:4.5
+    container_name: prod-moodle_app
+    restart: unless-stopped
+    depends_on:
+      moodle_db:
+        condition: service_healthy
+    ports:
+      - "80:8080"
+    environment:
+      MOODLE_DATABASE_TYPE: mysqli
+      MOODLE_DATABASE_HOST: moodle_db
+      MOODLE_DATABASE_NAME: ${MYSQL_DATABASE}
+      MOODLE_DATABASE_USER: ${MYSQL_USER}
+      MOODLE_DATABASE_PASSWORD: ${MYSQL_PASSWORD}
+      MOODLE_USERNAME: ${MOODLE_USERNAME}
+      MOODLE_PASSWORD: ${MOODLE_PASSWORD}
+      MOODLE_EMAIL: ${MOODLE_EMAIL}
+    volumes:
+      - moodledata:/bitnami/moodle
+      - moodledata_data:/bitnami/moodledata
+    networks:
+      - moodle_net
+
+networks:
+  moodle_net:
+    name: prod_moodle_net
+    driver: bridge
+
+volumes:
+  moodledata:
+    name: prod_moodledata
+  moodledata_data:
+    name: prod_moodledata_data
+  db_data:
+    name: prod_db_data

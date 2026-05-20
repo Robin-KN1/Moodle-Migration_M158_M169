@@ -1,0 +1,48 @@
+# transit/docker-compose.3.11.yml
+# Upgrade-Stufe: 3.10 → 3.11
+# Nutzung: docker compose -p transit311 -f docker-compose.3.11.yml up -d
+
+services:
+  moodle_db:
+    image: mysql:8.0
+    container_name: transit311-moodle_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - moodle_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  moodle_app:
+    image: php:7.4-apache
+    container_name: transit311-moodle_app
+    restart: unless-stopped
+    depends_on:
+      moodle_db:
+        condition: service_healthy
+    ports:
+      - "8091:80"
+    volumes:
+      - ./moodle-src/moodle-3.11:/var/www/html
+      - moodledata:/var/www/moodledata
+    networks:
+      - moodle_net
+
+networks:
+  moodle_net:
+    driver: bridge
+
+volumes:
+  moodledata:
+    name: transit311_moodledata
+  db_data:
+    name: transit311_db_data
