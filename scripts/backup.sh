@@ -31,7 +31,7 @@ ORIG_USER="${SUDO_USER:-vmadmin}"
 
 mkdir -p "$BACKUP_DIR"
 
-echo "=== Moodle-Backup gestartet: $(date) ==="
+echo "=== Moodle-Backup gestartet: $(date)x ==="
 echo "Ziel-Verzeichnis: $BACKUP_DIR"
 
 # ========== Schritt 1: MySQL-Dump ==========
