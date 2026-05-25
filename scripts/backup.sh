@@ -1,44 +1,22 @@
 #!/bin/bash
 #
-# restore.sh — spielt Moodle-Backup in einen laufenden Docker-Stack zurück.
+# backup.sh — sichert MySQL-DB und moodledata vom Moodle-Altsystem.
 #
-# Nutzung:
-#   sudo bash restore.sh <db-dump.sql.gz> <moodledata.tar.gz> [stack-prefix]
-#
-# Beispiel:
-#   sudo bash restore.sh \
-#     ~/moodle-migration/backups/moodle_db_20260513_141059.sql.gz \
-#     ~/moodle-migration/backups/moodledata_20260513_141059.tar.gz \
-#     transit
-#
-# Voraussetzungen:
-#   - Container moodle_db und moodle_app laufen (docker compose up -d)
-#   - .env mit MYSQL_ROOT_PASSWORD existiert im Stack-Verzeichnis
+# Nutzung: sudo bash backup.sh
 #
 
 set -euo pipefail
 
-# ========== Argumente ==========
-if [[ $# -lt 2 ]]; then
-    echo "Nutzung: $0 <db-dump.sql.gz> <moodledata.tar.gz> [stack-prefix]" >&2
-    echo "" >&2
-    echo "Beispiel:" >&2
-    echo "  $0 ../backups/moodle_db_*.sql.gz ../backups/moodledata_*.tar.gz transit" >&2
-    exit 1
-fi
+# ========== Konfiguration ==========
+BACKUP_DIR="/home/vmadmin/moodle-migration/backups"
+MOODLEDATA_SRC="/var/www/moodledata"
+DB_NAME="moodle"
+DB_DEFAULTS="/etc/mysql/debian.cnf"
 
-DB_DUMP="$1"
-MOODLEDATA_TAR="$2"
-STACK_PREFIX="${3:-transit}"
-
-# Container-Namen ableiten (Docker Compose hängt Prefix vorne dran)
-DB_CONTAINER="${STACK_PREFIX}-moodle_db-1"
-APP_CONTAINER="${STACK_PREFIX}-moodle_app-1"
-MOODLEDATA_VOLUME="${STACK_PREFIX}_moodledata"
-
-# .env-Datei aus dem Stack-Verzeichnis lesen
-STACK_DIR="$HOME/moodle-migration/${STACK_PREFIX}"
-ENV_FILE="${STACK_DIR}/.env"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+DB_DUMP="$BACKUP_DIR/moodle_db_${TIMESTAMP}.sql.gz"
+MOODLEDATA_TAR="$BACKUP_DIR/moodledata_${TIMESTAMP}.tar.gz"
+CHECKSUM_FILE="$BACKUP_DIR/checksums_${TIMESTAMP}.txt"
 
 # ========== Vorab-Checks ==========
 if [[ $EUID -ne 0 ]]; then
@@ -46,115 +24,53 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-[[ -f "$DB_DUMP" ]]        || { echo "Fehler: DB-Dump nicht gefunden: $DB_DUMP" >&2; exit 1; }
-[[ -f "$MOODLEDATA_TAR" ]] || { echo "Fehler: moodledata-Archiv nicht gefunden: $MOODLEDATA_TAR" >&2; exit 1; }
-[[ -f "$ENV_FILE" ]]       || { echo "Fehler: .env nicht gefunden: $ENV_FILE" >&2; exit 1; }
+ORIG_USER="${SUDO_USER:-vmadmin}"
 
-# MYSQL_ROOT_PASSWORD aus .env lesen
-MYSQL_ROOT_PASSWORD=$(grep -E '^MYSQL_ROOT_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
-[[ -n "$MYSQL_ROOT_PASSWORD" ]] || { echo "Fehler: MYSQL_ROOT_PASSWORD ist leer in $ENV_FILE" >&2; exit 1; }
+[[ -f "$DB_DEFAULTS" ]]    || { echo "Fehler: $DB_DEFAULTS fehlt" >&2; exit 1; }
+[[ -d "$MOODLEDATA_SRC" ]] || { echo "Fehler: $MOODLEDATA_SRC fehlt" >&2; exit 1; }
 
-# Container prüfen
-docker ps --format '{{.Names}}' | grep -q "^${DB_CONTAINER}$"  || { echo "Fehler: Container $DB_CONTAINER läuft nicht" >&2; exit 1; }
-docker ps --format '{{.Names}}' | grep -q "^${APP_CONTAINER}$" || { echo "Fehler: Container $APP_CONTAINER läuft nicht" >&2; exit 1; }
+mkdir -p "$BACKUP_DIR"
 
-echo "=== Moodle-Restore gestartet: $(date) ==="
-echo "DB-Dump:        $DB_DUMP"
-echo "moodledata:     $MOODLEDATA_TAR"
-echo "Stack-Prefix:   $STACK_PREFIX"
-echo "DB-Container:   $DB_CONTAINER"
-echo "App-Container:  $APP_CONTAINER"
+echo "=== Moodle-Backup gestartet: $(date)x ==="
+echo "Ziel-Verzeichnis: $BACKUP_DIR"
 
-# ========== Schritt 1: Checksum prüfen (falls Datei vorhanden) ==========
+# ========== Schritt 1: MySQL-Dump ==========
 echo ""
-echo "[1/5] Checksums prüfen..."
-CHECKSUM_FILE=$(dirname "$DB_DUMP")/checksums_$(basename "$DB_DUMP" | sed 's/moodle_db_//;s/.sql.gz//').txt
-if [[ -f "$CHECKSUM_FILE" ]]; then
-    (
-        cd "$(dirname "$DB_DUMP")"
-        sha256sum -c "$(basename "$CHECKSUM_FILE")"
-    )
-else
-    echo "      Hinweis: Kein Checksum-File gefunden ($CHECKSUM_FILE) — überspringe."
-fi
+echo "[1/4] MySQL-Dump erstellen..."
+mysqldump \
+    --defaults-file="$DB_DEFAULTS" \
+    --single-transaction \
+    --routines \
+    --triggers \
+    --events \
+    --databases "$DB_NAME" \
+    | gzip > "$DB_DUMP"
+echo "      Erstellt: $DB_DUMP ($(du -h "$DB_DUMP" | cut -f1))"
 
-# ========== Schritt 2: DB einspielen ==========
+# ========== Schritt 2: moodledata-Archiv ==========
 echo ""
-echo "[2/5] DB-Dump in Container $DB_CONTAINER einspielen..."
-# zcat entpackt SQL-Dump, pipe direkt in mysql im Container
-# -i (interactive) damit STDIN durchgereicht wird
-zcat "$DB_DUMP" | docker exec -i \
-    -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" \
-    "$DB_CONTAINER" \
-    mysql -u root
-echo "      DB-Import abgeschlossen."
+echo "[2/4] moodledata archivieren..."
+tar -czf "$MOODLEDATA_TAR" -C /var/www moodledata
+echo "      Erstellt: $MOODLEDATA_TAR ($(du -h "$MOODLEDATA_TAR" | cut -f1))"
 
-# ========== Schritt 3: moodledata ins Volume entpacken ==========
+# ========== Schritt 3: Checksums ==========
 echo ""
-echo "[3/5] moodledata ins Volume $MOODLEDATA_VOLUME entpacken..."
+echo "[3/4] SHA256-Checksums berechnen..."
+(
+    cd "$BACKUP_DIR"
+    sha256sum \
+        "$(basename "$DB_DUMP")" \
+        "$(basename "$MOODLEDATA_TAR")" \
+        > "$CHECKSUM_FILE"
+)
+cat "$CHECKSUM_FILE"
 
-# Volume mounten in einen Hilfs-Container, tar darin auspacken.
-# Wir nutzen alpine:latest weil minimal und schnell.
-# Achtung: tar-Archiv hat moodledata/... als Top-Level — wir mounten direkt
-# in /restore und entpacken mit --strip-components=1, damit der Inhalt
-# direkt ins Volume-Root landet (nicht in /restore/moodledata).
-docker run --rm \
-    -v "${MOODLEDATA_VOLUME}:/restore" \
-    -v "$(realpath "$MOODLEDATA_TAR"):/backup.tar.gz:ro" \
-    alpine:latest \
-    sh -c "rm -rf /restore/* /restore/.[!.]* 2>/dev/null; tar -xzf /backup.tar.gz -C /restore --strip-components=1"
-echo "      moodledata wiederhergestellt."
-
-# ========== Schritt 4: Berechtigungen setzen ==========
+# ========== Schritt 4: Ownership ==========
 echo ""
-echo "[4/5] Berechtigungen im moodledata setzen..."
-# Bitnami-Moodle-Container nutzt User 1001:0 (daemon).
-# Klassisches Apache-Image (php:7.4-apache) nutzt www-data (33:33).
-# Wir setzen je nach App-Container-Image den richtigen Owner.
-APP_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$APP_CONTAINER")
-if [[ "$APP_IMAGE" == *"bitnami"* ]]; then
-    OWNER="1001:0"
-    echo "      Erkannt: Bitnami-Image → Owner $OWNER"
-else
-    OWNER="33:33"
-    echo "      Erkannt: Standard PHP/Apache → Owner $OWNER (www-data)"
-fi
-
-docker run --rm \
-    -v "${MOODLEDATA_VOLUME}:/restore" \
-    alpine:latest \
-    chown -R "$OWNER" /restore
-echo "      Ownership gesetzt auf $OWNER."
-
-# ========== Schritt 5: Verifikation ==========
-echo ""
-echo "[5/5] Verifikation..."
-
-# DB: Zeilen-Counts der wichtigsten Tabellen
-echo ""
-echo "      DB-Tabellen (Zeilen-Counts):"
-docker exec \
-    -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" \
-    "$DB_CONTAINER" \
-    mysql -u root -N -B -e "
-        SELECT 'mdl_user'         AS tabelle, COUNT(*) AS anzahl FROM moodle.mdl_user
-        UNION SELECT 'mdl_course',           COUNT(*) FROM moodle.mdl_course
-        UNION SELECT 'mdl_course_modules',   COUNT(*) FROM moodle.mdl_course_modules
-        UNION SELECT 'mdl_files',            COUNT(*) FROM moodle.mdl_files
-        UNION SELECT 'mdl_role_assignments', COUNT(*) FROM moodle.mdl_role_assignments;
-    " | column -t
-
-# Volume: Dateien gezählt
-echo ""
-echo "      moodledata-Volume (Anzahl Dateien in filedir):"
-FILE_COUNT=$(docker run --rm -v "${MOODLEDATA_VOLUME}:/m:ro" alpine:latest \
-    sh -c "find /m/filedir -type f 2>/dev/null | wc -l")
-echo "      filedir: $FILE_COUNT Dateien"
+echo "[4/4] Ownership auf '$ORIG_USER' setzen..."
+chown "$ORIG_USER:$ORIG_USER" "$DB_DUMP" "$MOODLEDATA_TAR" "$CHECKSUM_FILE"
 
 echo ""
-echo "=== Restore abgeschlossen: $(date) ==="
+echo "=== Backup abgeschlossen: $(date) ==="
 echo ""
-echo "Nächster Schritt:"
-echo "  - Browser öffnen auf http://localhost:<port-deines-stacks>"
-echo "  - Login mit Admin-Account testen"
-echo "  - Falls Moodle nach Upgrade fragt: das ist normal bei Major-Version-Wechsel"
+ls -lh "$DB_DUMP" "$MOODLEDATA_TAR" "$CHECKSUM_FILE"
