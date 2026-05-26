@@ -86,6 +86,18 @@ MOODLE_EMAIL=admin@moodle.local
 EOF
 ```
 
+**Backup-Dateien erstellen** (kommen nicht ins Repo, müssen lokal erzeugt werden):
+
+Die Backup-Dateien (`moodle_db_*.sql.gz` und `moodledata_*.tar.gz`) sind nicht im Repo — sie werden direkt vom Altsystem erstellt. Das Altsystem muss laufen (Apache + MySQL auf Port 8080).
+
+```bash
+sudo bash ~/moodle-migration/scripts/backup.sh
+```
+
+Danach liegen die Dateien unter `~/moodle-migration/backups/`. Ohne diese Dateien kann `restore.sh` nicht ausgeführt werden.
+
+---
+
 **Moodle-Tarballs herunterladen** (nicht im Repo, zu gross):
 
 ```bash
