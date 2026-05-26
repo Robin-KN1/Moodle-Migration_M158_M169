@@ -1,7 +1,6 @@
 # prod/docker-compose.yml
 # Produktiver Stack: Moodle 4.5 LTS + MySQL 8.0
 # Nutzung: docker compose -p prod up -d
-
 services:
   moodle_db:
     image: mysql:8.0
@@ -21,9 +20,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
   moodle_app:
-    image: bitnami/moodle:4.5
+    image: bitnamilegacy/moodle:4.5
     container_name: prod-moodle_app
     restart: unless-stopped
     depends_on:
@@ -45,12 +43,10 @@ services:
       - moodledata_data:/bitnami/moodledata
     networks:
       - moodle_net
-
 networks:
   moodle_net:
     name: prod_moodle_net
     driver: bridge
-
 volumes:
   moodledata:
     name: prod_moodledata
