@@ -35,6 +35,71 @@ Pro Stufe haben wir einen eigenen Docker-Stack verwendet:
 
 ---
 
+## Repo auf die VM klonen
+
+```bash
+# Repo klonen
+git clone https://github.com/Robin-KN1/Moodle-Migration_M158_M169.git moodle-migration-repo
+
+# Reingehen
+cd moodle-migration-repo
+
+# Prüfen ob alles da ist
+ls
+```
+
+Danach noch die Arbeitsordner anlegen die nicht im Repo sind:
+
+```bash
+mkdir -p ~/moodle-migration/backups
+mkdir -p ~/moodle-migration/transit/moodle-src
+mkdir -p ~/moodle-migration/prod
+mkdir -p ~/moodle-migration/docs/screenshots
+
+# Compose-Files und Scripts rüberkopieren
+cp -r ~/moodle-migration-repo/transit/*.yml ~/moodle-migration/transit/
+cp -r ~/moodle-migration-repo/prod/docker-compose.yml ~/moodle-migration/prod/
+cp -r ~/moodle-migration-repo/scripts/* ~/moodle-migration/scripts/ 2>/dev/null || \
+    mkdir -p ~/moodle-migration/scripts && cp -r ~/moodle-migration-repo/scripts/* ~/moodle-migration/scripts/
+```
+
+**.env Dateien anlegen** (kommen nicht ins Repo wegen Passwörtern):
+
+```bash
+# transit/.env
+cat > ~/moodle-migration/transit/.env << 'EOF'
+MYSQL_ROOT_PASSWORD=transitroot123
+MYSQL_DATABASE=moodle
+MYSQL_USER=moodle
+MYSQL_PASSWORD=transitpass123
+EOF
+
+# prod/.env
+cat > ~/moodle-migration/prod/.env << 'EOF'
+MYSQL_ROOT_PASSWORD=prodroot_changeme
+MYSQL_DATABASE=moodle
+MYSQL_USER=moodle
+MYSQL_PASSWORD=prodpass_changeme
+MOODLE_USERNAME=admin
+MOODLE_PASSWORD=Admin1234!
+MOODLE_EMAIL=admin@moodle.local
+EOF
+```
+
+**Moodle-Tarballs herunterladen** (nicht im Repo, zu gross):
+
+```bash
+cd ~/moodle-migration/transit/moodle-src
+
+wget -O moodle-3.11.18.tgz \
+    "https://github.com/moodle/moodle/archive/refs/tags/v3.11.18.tar.gz"
+
+wget -O moodle-4.1.17.tgz \
+    "https://github.com/moodle/moodle/archive/refs/tags/v4.1.17.tar.gz"
+```
+
+---
+
 ## Schnellstart (Prod-Stack starten)
 
 ```bash
