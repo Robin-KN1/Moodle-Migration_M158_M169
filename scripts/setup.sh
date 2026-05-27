@@ -153,6 +153,26 @@ wait_healthy() {
 }
 
 # ============================================================
+# Hilfsfunktion: Warte bis MySQL root auth funktioniert
+# Nötig weil mysqladmin ping (Healthcheck) erfolgreich ist BEVOR
+# MySQL das Root-Passwort fertig initialisiert hat (Race Condition).
+# ============================================================
+wait_mysql_ready() {
+    local CONTAINER="$1"
+    local PASSWORD="$2"
+    info "  -> Warte auf MySQL root auth in $CONTAINER..."
+    for i in $(seq 1 60); do
+        if docker exec -e MYSQL_PWD="$PASSWORD" "$CONTAINER" \
+            mysql -u root -e "SELECT 1" &>/dev/null; then
+            ok "  MySQL root auth bereit"
+            return 0
+        fi
+        sleep 3
+    done
+    fail "MySQL root auth nicht bereit nach 3 Min in $CONTAINER"
+}
+
+# ============================================================
 # Hilfsfunktion: Warte bis Bitnami KOMPLETT fertig ist
 # Bitnami schreibt "Moodle installation completed" wenn wirklich alles fertig ist
 # ============================================================
@@ -308,8 +328,10 @@ ok "Sources bereit"
 info "Schritt 4/8: Transit-Stack 3.10 starten..."
 cd "$BASE/transit"
 
+docker compose -p transit310 -f docker-compose.3.10.yml down -v 2>/dev/null || true
 docker compose -p transit310 -f docker-compose.3.10.yml up -d
 wait_healthy transit310-moodle_db
+wait_mysql_ready transit310-moodle_db "$TRANSIT_ROOT"
 
 do_restore "$DB_DUMP" "$MOODLE_TAR" "transit310-moodle_db" "transit310_moodledata"
 write_config "transit310-moodle_app" "8090"
@@ -322,9 +344,11 @@ ok "Transit 3.10 bereit"
 info "Schritt 5/8: Upgrade 3.10 -> 3.11..."
 cd "$BASE/transit"
 
-docker compose -p transit310 -f docker-compose.3.10.yml down
+docker compose -p transit310 -f docker-compose.3.10.yml down -v
+docker compose -p transit311 -f docker-compose.3.11.yml down -v 2>/dev/null || true
 docker compose -p transit311 -f docker-compose.3.11.yml up -d
 wait_healthy transit311-moodle_db
+wait_mysql_ready transit311-moodle_db "$TRANSIT_ROOT"
 
 do_restore "$DB_DUMP" "$MOODLE_TAR" "transit311-moodle_db" "transit311_moodledata"
 write_config "transit311-moodle_app" "8091"
@@ -352,9 +376,11 @@ ok "Snapshot: moodle_3.11_ready.sql.gz"
 info "Schritt 7/8: Upgrade 3.11 -> 4.1..."
 cd "$BASE/transit"
 
-docker compose -p transit311 -f docker-compose.3.11.yml down
+docker compose -p transit311 -f docker-compose.3.11.yml down -v
+docker compose -p transit41  -f docker-compose.4.1.yml down -v 2>/dev/null || true
 docker compose -p transit41  -f docker-compose.4.1.yml up -d
 wait_healthy transit41-moodle_db
+wait_mysql_ready transit41-moodle_db "$TRANSIT_ROOT"
 
 do_restore "$BACKUPS/moodle_3.11_ready.sql.gz" "$MOODLE_TAR" \
     "transit41-moodle_db" "transit41_moodledata"
@@ -383,6 +409,8 @@ docker exec \
     | gzip > "$BACKUPS/moodle_4.1_ready.sql.gz"
 chown "$REAL_USER:$REAL_USER" "$BACKUPS/moodle_4.1_ready.sql.gz"
 ok "Snapshot: moodle_4.1_ready.sql.gz"
+
+docker compose -p transit41 -f "$BASE/transit/docker-compose.4.1.yml" down -v 2>/dev/null || true
 
 # Apache stoppen damit Port 80 frei ist
 info "  -> Apache stoppen (braucht Port 80)..."
@@ -415,11 +443,25 @@ zcat "$BACKUPS/moodle_4.1_ready.sql.gz" \
         -e MYSQL_PWD=prodroot_changeme \
         prod-moodle_db mysql -u root moodle
 
-# Ownership für Bitnami
+# moodledata (hochgeladene Dateien) ins richtige Bitnami-Volume einspielen
+info "  -> moodledata ins Volume prod_moodledata_data einspielen..."
 docker run --rm \
-    -v prod_moodledata:/restore \
+    -v "prod_moodledata_data:/restore" \
     alpine:latest \
-    chown -R 1001:1 /restore
+    sh -c "rm -rf /restore/* 2>/dev/null || true"
+docker run --rm \
+    -v "prod_moodledata_data:/restore" \
+    -v "$(realpath "$MOODLE_TAR"):/backup.tar.gz:ro" \
+    alpine:latest \
+    sh -c "tar -xzf /backup.tar.gz -C /restore --strip-components=1"
+ok "  moodledata eingespielt"
+
+# wwwroot in DB auf tatsaechliche Server-URL aktualisieren
+docker exec \
+    -e MYSQL_PWD=prodroot_changeme \
+    prod-moodle_db \
+    mysql -u root moodle \
+    -e "UPDATE mdl_config SET value='http://localhost' WHERE name='wwwroot';"
 
 # Collation fixen
 docker exec prod-moodle_app sed -i \
