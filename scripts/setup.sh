@@ -288,6 +288,18 @@ if [[ ! -d "moodle-4.1.17" ]]; then
     [[ -d "moodle-4.1.17" ]] || fail "moodle-4.1.17 konnte nicht entpackt werden"
 fi
 
+# Relative Symlinks erstellen BEVOR docker compose up laeuft
+# Wichtig: relativ nicht absolut, sonst erstellt Docker leere Ordner
+rm -rf "$SRC/moodle-3.11"
+rm -rf "$SRC/moodle-4.1"
+cd "$SRC"
+ln -sfn moodle-3.11.18 moodle-3.11
+ln -sfn moodle-4.1.17  moodle-4.1
+
+# Pruefen ob Symlinks funktionieren
+[[ -f "$SRC/moodle-3.11/version.php" ]] || fail "Symlink moodle-3.11 funktioniert nicht"
+[[ -f "$SRC/moodle-4.1/version.php"  ]] || fail "Symlink moodle-4.1 funktioniert nicht"
+
 ok "Sources bereit"
 
 # ============================================================
