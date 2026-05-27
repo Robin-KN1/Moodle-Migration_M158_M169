@@ -1,110 +1,93 @@
-# Moodle Migration 3.10 → 4.5 LTS
+Moodle Migration 3.10 → 4.5 LTS
 
-Automated migration pipeline from Moodle 3.10 to 4.5 LTS via Docker.
-Moodle requires sequential upgrades — direct jumps across major versions are not supported.
+Automatisierte Migrationspipeline von Moodle 3.10 auf 4.5 LTS mit Docker.
+Moodle unterstützt keine direkten Sprünge zwischen Hauptversionen, deshalb müssen die Updates schrittweise durchgeführt werden.
 
-**Upgrade path:** `3.10 → 3.11 → 4.1 → 4.5 LTS`
+Upgrade-Pfad: 3.10 → 3.11 → 4.1 → 4.5 LTS
 
-**Team:** Noah Kronhardt, Robin Weder, Nico Bischof — GBS St.Gallen (M158/M169)
+Team: Noah Kronhardt, Robin Weder, Nico Bischof — GBS St.Gallen (M158/M169)
 
----
-
-## Prerequisites
-
-- Ubuntu 22.04 (or compatible)
-- Docker Engine 20.10+ with Compose v2 (`docker compose` not `docker-compose`)
-- Running Moodle 3.10 source at `/var/www/html` and data at `/var/www/moodledata`
-- MySQL accessible via `/etc/mysql/debian.cnf`
-- ~10 GB free disk space
-- Internet access for `docker pull`
-
----
-
-## Usage
-
-```bash
+Voraussetzungen
+Ubuntu 22.04 (oder kompatibel)
+Docker Engine 20.10+ mit Compose v2 (docker compose statt docker-compose)
+Laufende Moodle-3.10-Installation unter /var/www/html
+Moodle-Daten unter /var/www/moodledata
+MySQL-Zugriff über /etc/mysql/debian.cnf
+Ca. 10 GB freier Speicherplatz
+Internetzugang für docker pull
+Verwendung
 git clone https://github.com/Robin-KN1/Moodle-Migration_M158_M169.git ~/moodle-migration-repo
 sudo bash ~/moodle-migration-repo/scripts/setup.sh
-```
 
-The script is fully automated and idempotent — existing backups and downloaded sources are reused on re-runs. When it completes, Moodle 4.5 LTS is running at **http://localhost**.
+Das Skript läuft vollständig automatisiert und ist idempotent. Bereits vorhandene Backups und heruntergeladene Quellen werden bei erneutem Ausführen wiederverwendet. Nach Abschluss läuft Moodle 4.5 LTS unter http://localhost.
 
-> **Note:** Initial run takes 20–40 minutes. Bitnami initializes a fresh Moodle instance internally before the migrated data is imported.
+Hinweis: Der erste Durchlauf dauert ca. 20–40 Minuten. Bitnami initialisiert zuerst intern eine neue Moodle-Instanz, bevor die migrierten Daten importiert werden.
 
----
+Was setup.sh macht
+Schritt	Beschreibung
+1	Erstellt Arbeitsverzeichnisse, schreibt .env-Dateien und kopiert Compose-Konfigurationen
+2	Erstellt ein Backup der bestehenden Moodle-Datenbank und von moodledata (wird übersprungen, falls bereits vorhanden)
+3	Lädt Moodle 3.11.18 und 4.1.17 herunter und erstellt Versions-Symlinks
+4	Startet den transit310-Stack, stellt das Backup wieder her und installiert PHP-Erweiterungen
+5	Führt das Upgrade auf 3.11 durch: Neustart mit transit311, Wiederherstellung der Daten und Ausführen von upgrade.php
+6	Erstellt einen Snapshot der 3.11-Datenbank
+7	Führt das Upgrade auf 4.1 durch: Neustart mit transit41, Wiederherstellung des 3.11-Snapshots und Ausführen von upgrade.php
+8	Startet den Bitnami-4.5-Produktivstack, importiert die migrierte Datenbank sowie moodledata und aktualisiert auf 4.5
 
-## What `setup.sh` does
+Die Transit-Stacks werden nach jeder Phase mit --volumes entfernt, damit MySQL bei jedem erneuten Start sauber initialisiert wird.
 
-| Step | Description |
-|------|-------------|
-| 1 | Creates working directories, writes `.env` files, copies compose configs |
-| 2 | Backs up the existing Moodle DB and moodledata (skipped if backup already exists) |
-| 3 | Downloads Moodle 3.11.18 and 4.1.17 sources, creates version symlinks |
-| 4 | Starts transit310 stack, restores backup, installs PHP extensions |
-| 5 | Upgrades to 3.11: restarts with transit311, restores data, runs `upgrade.php` |
-| 6 | Snapshots the 3.11 DB |
-| 7 | Upgrades to 4.1: restarts with transit41, restores 3.11 snapshot, runs `upgrade.php` |
-| 8 | Starts Bitnami 4.5 prod stack, imports migrated DB + moodledata, upgrades to 4.5 |
+Konfiguration
 
-Transit stacks are torn down with `--volumes` after each stage to guarantee clean MySQL initialization on re-runs.
+Passwörter und Einstellungen befinden sich am Anfang von setup.sh:
 
----
+Variable	Standardwert	Beschreibung
+TRANSIT_ROOT	transitroot123	MySQL-Root-Passwort für alle Transit-Stacks
+BASE	~/moodle-migration	Arbeitsverzeichnis
+REPO	~/moodle-migration-repo	Dieses Repository
 
-## Configuration
+Die Zugangsdaten für den Produktivstack werden in Schritt 1 in $BASE/prod/.env gespeichert. Falls nötig, können sie vor dem Start in setup.sh angepasst werden:
 
-Passwords and settings are defined at the top of `setup.sh`:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TRANSIT_ROOT` | `transitroot123` | MySQL root password for all transit stacks |
-| `BASE` | `~/moodle-migration` | Working directory |
-| `REPO` | `~/moodle-migration-repo` | This repository |
-
-Prod stack credentials are written to `$BASE/prod/.env` during step 1. Change them in `setup.sh` before running if needed:
-
-```bash
 MYSQL_ROOT_PASSWORD=prodroot_changeme
 MYSQL_PASSWORD=prodpass_changeme
 MOODLE_PASSWORD=Admin1234!
-```
-
----
-
-## Repository structure
-
-```
+Repository-Struktur
 .
 ├── scripts/
-│   └── setup.sh              # Main migration script
+│   └── setup.sh              # Hauptskript für die Migration
 ├── transit/
 │   ├── docker-compose.3.10.yml
 │   ├── docker-compose.3.11.yml
 │   └── docker-compose.4.1.yml
 └── prod/
     └── docker-compose.yml    # Bitnami Moodle 4.5 LTS
-```
 
-Transit stacks mount Moodle sources from `$BASE/transit/moodle-src/` and use named volumes (`transit310_*`, `transit311_*`, `transit41_*`). The prod stack uses `bitnamilegacy/moodle:4.5`.
+Die Transit-Stacks binden die Moodle-Quellen aus $BASE/transit/moodle-src/ ein und verwenden benannte Volumes (transit310_*, transit311_*, transit41_*).
+Der Produktivstack verwendet bitnamilegacy/moodle:4.5.
 
----
+Fehlerbehebung
+Migration bricht mittendrin ab — kann das Skript erneut ausgeführt werden?
 
-## Troubleshooting
+Ja. Bereits vorhandene Backups und heruntergeladene Quellen werden übersprungen. Vor jeder Phase werden alle Transit-Stacks mit down -v bereinigt, damit keine alten Volumes Probleme verursachen.
 
-**Migration fails midway — can I re-run?**  
-Yes. The script skips existing backups and downloaded sources. All transit stacks are cleaned up with `down -v` before each stage, so stale volumes don't cause issues.
+ERROR 1045 (28000): Access denied for user 'root'
 
-**`ERROR 1045 (28000): Access denied for user 'root'`**  
-Caused by leftover MySQL volumes from a previous failed run. Fixed in the current version — transit stacks are always started with fresh volumes.
+Dieser Fehler entsteht meistens durch alte MySQL-Volumes eines vorherigen fehlgeschlagenen Durchlaufs.
+Das Problem wurde in der aktuellen Version behoben — Transit-Stacks werden immer mit neuen Volumes gestartet.
 
-**HTTP 500 after prod start**  
-Usually a permissions issue on `/bitnami/moodledata`. The Bitnami container must run as `daemon` (uid=1). Do not manually `chown` to uid 1001 — Bitnami sets permissions itself on startup.
+HTTP 500 nach dem Start des Produktivsystems
 
-**`bitnami/moodle:4.5` not found**  
-The image was moved to `bitnamilegacy/moodle:4.5`. The compose file already references the correct image.
+Meistens liegt das an falschen Berechtigungen auf /bitnami/moodledata.
+Der Bitnami-Container muss als daemon (uid=1) laufen. Nicht manuell mit chown auf uid 1001 ändern — Bitnami setzt die Berechtigungen beim Start automatisch korrekt.
 
-**Old Moodle still needed on port 8080**  
-The script stops Apache to free port 80. To run the old installation in parallel:
-```bash
+bitnami/moodle:4.5 nicht gefunden
+
+Das Image wurde nach bitnamilegacy/moodle:4.5 verschoben.
+Die Compose-Datei verweist bereits auf das richtige Image.
+
+Alte Moodle-Version weiterhin auf Port 8080 betreiben
+
+Das Skript stoppt Apache, damit Port 80 frei wird.
+Um die alte Installation parallel weiterlaufen zu lassen:
+
 sudo sed -i 's/^Listen 80$/Listen 8080/' /etc/apache2/ports.conf
 sudo systemctl start apache2
-```
