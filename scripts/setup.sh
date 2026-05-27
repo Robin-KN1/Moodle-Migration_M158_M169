@@ -36,11 +36,11 @@ BASE="$REAL_HOME/moodle-migration"
 REPO="$REAL_HOME/moodle-migration-repo"
 BACKUPS="$BASE/backups"
 SRC="$BASE/transit/moodle-src"
+TRANSIT_ENV="$BASE/transit/.env"
 TRANSIT_ROOT="transitroot123"
 
 # ============================================================
 # Hilfsfunktion: Neue config.php schreiben
-# Benutzt tmpfile + single-quoted heredoc (kein bash-Escaping nötig)
 # ============================================================
 write_config() {
     local CONTAINER="$1"
@@ -48,7 +48,6 @@ write_config() {
     local TMPFILE
     TMPFILE=$(mktemp /tmp/moodle_config_XXXXXX.php)
 
-    # Single-quoted heredoc: bash expandiert NICHTS darin
     cat > "$TMPFILE" << 'PHPEOF'
 <?php
 unset($CFG);
@@ -74,14 +73,13 @@ $CFG->directorypermissions = 0777;
 require_once(__DIR__ . '/lib/setup.php');
 PHPEOF
 
-    # Platzhalter mit echten Werten ersetzen (auf dem Host, nicht im Container)
-    sed -i "s|DBHOST_PH|moodle_db|g"                      "$TMPFILE"
-    sed -i "s|DBPASS_PH|${TRANSIT_ROOT}|g"                "$TMPFILE"
-    sed -i "s|WWWROOT_PH|http://localhost:${PORT}|g"       "$TMPFILE"
+    sed -i "s|DBHOST_PH|moodle_db|g"                "$TMPFILE"
+    sed -i "s|DBPASS_PH|${TRANSIT_ROOT}|g"           "$TMPFILE"
+    sed -i "s|WWWROOT_PH|http://localhost:${PORT}|g" "$TMPFILE"
 
     docker cp "$TMPFILE" "$CONTAINER:/var/www/html/config.php"
     rm -f "$TMPFILE"
-    ok "  config.php gesetzt (Port $PORT, DB: moodle_db)"
+    ok "  config.php gesetzt (Port $PORT)"
 }
 
 # ============================================================
@@ -105,7 +103,6 @@ do_restore() {
     info "  -> moodledata ins Volume $VOLUME..."
     docker run --rm \
         -v "${VOLUME}:/restore" \
-        -v "${DB_DUMP}:/dummy:ro" \
         alpine:latest \
         sh -c "rm -rf /restore/* 2>/dev/null || true"
 
@@ -152,7 +149,37 @@ wait_healthy() {
         fi
         sleep 5
     done
-    fail "$CONTAINER nicht healthy nach 5 Min — abbruch"
+    fail "$CONTAINER nicht healthy nach 5 Min"
+}
+
+# ============================================================
+# Hilfsfunktion: Warte bis Bitnami KOMPLETT fertig ist
+# Bitnami schreibt "Moodle installation completed" wenn wirklich alles fertig ist
+# ============================================================
+wait_bitnami_ready() {
+    info "  -> Warte bis Bitnami komplett initialisiert (~10-15 Min)..."
+    info "     (Bitnami installiert Moodle komplett neu bevor wir Daten einspielen)"
+    for i in $(seq 1 300); do
+        if docker logs prod-moodle_app 2>&1 | grep -q "Moodle setup finished"; then
+            ok "  Bitnami ist fertig"
+            return 0
+        fi
+        # Fortschritt anzeigen
+        if (( i % 12 == 0 )); then
+            MINS=$(( i * 5 / 60 ))
+            info "  ... noch lädt ($MINS Min vergangen)"
+        fi
+        sleep 5
+    done
+    # Falls "Moodle installation completed" nicht erscheint,
+    # prüfen ob Apache läuft als Fallback
+    if docker logs prod-moodle_app 2>&1 | grep -q "Starting Apache"; then
+        info "  Bitnami Apache läuft — warte noch 60s für DB-Init..."
+        sleep 60
+        ok "  Bitnami bereit (via Fallback)"
+        return 0
+    fi
+    fail "Bitnami nicht bereit nach 25 Min"
 }
 
 # ============================================================
@@ -160,7 +187,7 @@ wait_healthy() {
 # ============================================================
 info "Schritt 1/8: Vorbereitung..."
 
-[[ -d "$REPO" ]] || fail "Repo nicht gefunden: $REPO\nBitte zuerst:\ngit clone https://github.com/Robin-KN1/Moodle-Migration_M158_M169.git $REPO"
+[[ -d "$REPO" ]] || fail "Repo nicht gefunden: $REPO\nBitte:\ngit clone https://github.com/Robin-KN1/Moodle-Migration_M158_M169.git $REPO"
 
 mkdir -p "$BACKUPS" "$SRC" "$BASE/transit" "$BASE/prod" "$BASE/scripts"
 
@@ -171,15 +198,13 @@ cp "$REPO/prod/docker-compose.yml"          "$BASE/prod/"
 
 chown -R "$REAL_USER:$REAL_USER" "$BASE"
 
-# transit .env
-cat > "$BASE/transit/.env" << EOF
+cat > "$TRANSIT_ENV" << EOF
 MYSQL_ROOT_PASSWORD=${TRANSIT_ROOT}
 MYSQL_DATABASE=moodle
 MYSQL_USER=moodle
 MYSQL_PASSWORD=transitpass123
 EOF
 
-# prod .env
 cat > "$BASE/prod/.env" << EOF
 MYSQL_ROOT_PASSWORD=prodroot_changeme
 MYSQL_DATABASE=moodle
@@ -197,10 +222,9 @@ ok "Vorbereitung abgeschlossen"
 # ============================================================
 info "Schritt 2/8: Backup vom Altsystem..."
 
-[[ -f /var/www/html/config.php ]] || fail "/var/www/html/config.php nicht gefunden — Altsystem läuft?"
+[[ -f /var/www/html/config.php ]] || fail "/var/www/html/config.php nicht gefunden"
 [[ -f /etc/mysql/debian.cnf ]]    || fail "/etc/mysql/debian.cnf nicht gefunden"
 
-# Prüfen ob Backup bereits existiert
 DB_DUMP=$(ls -t "$BACKUPS"/moodle_db_*.sql.gz 2>/dev/null | head -1 || true)
 MOODLE_TAR=$(ls -t "$BACKUPS"/moodledata_*.tar.gz 2>/dev/null | head -1 || true)
 
@@ -224,42 +248,30 @@ else
 fi
 
 # ============================================================
-# SCHRITT 3: Moodle Sources vorbereiten
+# SCHRITT 3: Moodle Sources
 # ============================================================
 info "Schritt 3/8: Moodle-Sources vorbereiten..."
 cd "$SRC"
 
-# 3.10 aus Altsystem
 if [[ ! -d "moodle-3.10" ]]; then
-    info "  -> moodle-3.10 aus Altsystem kopieren..."
     mkdir -p moodle-3.10
     cp -r /var/www/html/. moodle-3.10/
     chown -R "$REAL_USER:$REAL_USER" moodle-3.10/
     ok "  moodle-3.10 kopiert"
-else
-    info "  moodle-3.10 schon vorhanden"
 fi
 
-# 3.11 Tarball holen
 if [[ ! -f "moodle-3.11.18.tgz" ]]; then
-    info "  -> Moodle 3.11.18 herunterladen..."
     wget -q --show-progress -O moodle-3.11.18.tgz \
         "https://github.com/moodle/moodle/archive/refs/tags/v3.11.18.tar.gz"
 fi
 
-# 4.1 Tarball holen
 if [[ ! -f "moodle-4.1.17.tgz" ]]; then
-    info "  -> Moodle 4.1.17 herunterladen..."
     wget -q --show-progress -O moodle-4.1.17.tgz \
         "https://github.com/moodle/moodle/archive/refs/tags/v4.1.17.tar.gz"
 fi
 
-# 3.11 entpacken
 if [[ ! -d "moodle-3.11.18" ]]; then
-    info "  -> moodle-3.11.18 entpacken..."
     tar -xzf moodle-3.11.18.tgz -C .
-    # GitHub entpackt als moodle-3.11.18 (ohne 'v' prefix)
-    # Falls der Ordner anders heisst, umbenennen
     if [[ ! -d "moodle-3.11.18" ]]; then
         UNPACKED=$(find . -maxdepth 1 -type d -name "moodle-*3.11*" | head -1 || true)
         [[ -n "$UNPACKED" ]] && mv "$UNPACKED" moodle-3.11.18
@@ -267,9 +279,7 @@ if [[ ! -d "moodle-3.11.18" ]]; then
     [[ -d "moodle-3.11.18" ]] || fail "moodle-3.11.18 konnte nicht entpackt werden"
 fi
 
-# 4.1 entpacken
 if [[ ! -d "moodle-4.1.17" ]]; then
-    info "  -> moodle-4.1.17 entpacken..."
     tar -xzf moodle-4.1.17.tgz -C .
     if [[ ! -d "moodle-4.1.17" ]]; then
         UNPACKED=$(find . -maxdepth 1 -type d -name "moodle-*4.1*" | head -1 || true)
@@ -281,7 +291,7 @@ fi
 ok "Sources bereit"
 
 # ============================================================
-# SCHRITT 4: Transit 3.10 — Daten einspielen + Extensions
+# SCHRITT 4: Transit 3.10
 # ============================================================
 info "Schritt 4/8: Transit-Stack 3.10 starten..."
 cd "$BASE/transit"
@@ -289,13 +299,9 @@ cd "$BASE/transit"
 docker compose -p transit310 -f docker-compose.3.10.yml up -d
 wait_healthy transit310-moodle_db
 
-do_restore "$DB_DUMP" "$MOODLE_TAR" \
-    "transit310-moodle_db" \
-    "transit310_moodledata"
-
+do_restore "$DB_DUMP" "$MOODLE_TAR" "transit310-moodle_db" "transit310_moodledata"
 write_config "transit310-moodle_app" "8090"
 install_php_ext "transit310-moodle_app"
-
 ok "Transit 3.10 bereit"
 
 # ============================================================
@@ -305,25 +311,19 @@ info "Schritt 5/8: Upgrade 3.10 -> 3.11..."
 cd "$BASE/transit"
 
 docker compose -p transit310 -f docker-compose.3.10.yml down
-
 docker compose -p transit311 -f docker-compose.3.11.yml up -d
 wait_healthy transit311-moodle_db
 
-do_restore "$DB_DUMP" "$MOODLE_TAR" \
-    "transit311-moodle_db" \
-    "transit311_moodledata"
-
+do_restore "$DB_DUMP" "$MOODLE_TAR" "transit311-moodle_db" "transit311_moodledata"
 write_config "transit311-moodle_app" "8091"
 install_php_ext "transit311-moodle_app"
 
-info "  -> Moodle 3.10 -> 3.11 upgrade..."
 docker exec transit311-moodle_app \
     php /var/www/html/admin/cli/upgrade.php --non-interactive
-
 ok "3.11 Upgrade abgeschlossen"
 
 # ============================================================
-# SCHRITT 6: DB-Snapshot nach 3.11
+# SCHRITT 6: DB-Snapshot 3.11
 # ============================================================
 info "Schritt 6/8: DB-Snapshot nach 3.11..."
 docker exec \
@@ -341,26 +341,21 @@ info "Schritt 7/8: Upgrade 3.11 -> 4.1..."
 cd "$BASE/transit"
 
 docker compose -p transit311 -f docker-compose.3.11.yml down
-docker compose -p transit41  -f docker-compose.4.1.yml  up -d
+docker compose -p transit41  -f docker-compose.4.1.yml up -d
 wait_healthy transit41-moodle_db
 
 do_restore "$BACKUPS/moodle_3.11_ready.sql.gz" "$MOODLE_TAR" \
-    "transit41-moodle_db" \
-    "transit41_moodledata"
-
+    "transit41-moodle_db" "transit41_moodledata"
 write_config "transit41-moodle_app" "8092"
 install_php_ext "transit41-moodle_app"
 
-# max_input_vars für 4.1
 docker exec transit41-moodle_app sh -c \
     'echo "max_input_vars = 5000" > /usr/local/etc/php/conf.d/moodle.ini'
 docker restart transit41-moodle_app
 sleep 20
 
-info "  -> Moodle 3.11 -> 4.1 upgrade..."
 docker exec transit41-moodle_app \
     php /var/www/html/admin/cli/upgrade.php --non-interactive
-
 ok "4.1 Upgrade abgeschlossen"
 
 # ============================================================
@@ -377,23 +372,27 @@ docker exec \
 chown "$REAL_USER:$REAL_USER" "$BACKUPS/moodle_4.1_ready.sql.gz"
 ok "Snapshot: moodle_4.1_ready.sql.gz"
 
+# Apache stoppen damit Port 80 frei ist
+info "  -> Apache stoppen (braucht Port 80)..."
+systemctl stop apache2 2>/dev/null || true
+
 # Image holen
 docker pull bitnamilegacy/moodle:4.5
 
-docker compose -p transit41 -f "$BASE/transit/docker-compose.4.1.yml" down
+# Alte Prod-Container + Volumes komplett löschen (sauber starten)
+info "  -> Alte Prod-Volumes löschen (sauber starten)..."
+docker compose -p prod -f "$BASE/prod/docker-compose.yml" down -v 2>/dev/null || true
+
+# Prod starten
 cd "$BASE/prod"
 docker compose -p prod up -d
 
-info "  -> Warte bis Bitnami fertig initialisiert (~10 Min)..."
-for i in $(seq 1 200); do
-    if docker logs prod-moodle_app 2>&1 | grep -q "Starting Apache"; then
-        break
-    fi
-    sleep 5
-done
-sleep 10
+# *** WICHTIG: Warten bis Bitnami KOMPLETT fertig ist ***
+# Bitnami initialisiert Moodle komplett selbst — erst danach überschreiben wir die DB
+wait_bitnami_ready
 
-# DB mit 4.1-Daten überschreiben
+# DB komplett überschreiben mit unseren 4.1-Daten
+info "  -> DB mit migrierten Daten überschreiben..."
 docker exec \
     -e MYSQL_PWD=prodroot_changeme \
     prod-moodle_db mysql -u root \
@@ -404,7 +403,7 @@ zcat "$BACKUPS/moodle_4.1_ready.sql.gz" \
         -e MYSQL_PWD=prodroot_changeme \
         prod-moodle_db mysql -u root moodle
 
-# Ownership für Bitnami (1001:1)
+# Ownership für Bitnami
 docker run --rm \
     -v prod_moodledata:/restore \
     alpine:latest \
@@ -415,16 +414,19 @@ docker exec prod-moodle_app sed -i \
     "s|utf8mb4_0900_ai_ci|utf8mb4_unicode_ci|g" /bitnami/moodle/config.php
 
 # Upgrade auf 4.5
-info "  -> Moodle 4.1 -> 4.5 upgrade..."
+info "  -> Upgrade auf 4.5..."
 docker exec prod-moodle_app \
     php /opt/bitnami/moodle/admin/cli/upgrade.php --non-interactive
+
+# Container neu starten damit alles sauber lädt
+docker restart prod-moodle_app
+sleep 30
 
 ok "Prod-Stack fertig"
 
 # ============================================================
 # Fertig
 # ============================================================
-sleep 10
 HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
 
 echo ""
@@ -435,7 +437,7 @@ echo ""
 if [[ "$HTTP" == "200" || "$HTTP" == "303" ]]; then
     ok "Moodle laeuft auf http://localhost:80 (HTTP $HTTP)"
 else
-    info "HTTP $HTTP — evtl. noch kurz warten dann nochmal pruefen"
+    info "HTTP $HTTP — evtl. noch 1-2 Min warten"
 fi
 echo ""
 echo "  Login:  admin / Admin1234!"
